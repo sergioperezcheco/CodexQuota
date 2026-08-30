@@ -4,18 +4,20 @@
 
 ```
  🔴 Codex:0%|84%      ← 红点 = 5小时窗口已用满
- 🟢 GLM:96%|97%       ← 绿点 = 额度充裕
+ 🟢 GLM:98%|96%
+ 🟢 OpenCode:100%|42%
 ```
 
 白色等宽文字 + 彩色状态点，与 macOS 菜单栏原生风格一致。同一状态项内多行叠显，每个被监控的服务占一行，点击菜单即可勾选显示哪些。
 
 ## 功能
 
-- **自动检测已配置的服务**：启动时探测本机凭证（Codex 的 OAuth token、GLM 的 API Key），菜单里列出所有检测到的 coding plan 及其状态，未检测到的灰显并给出配置提示；也可点「重新检测可用服务」
-- **菜单勾选监控项**：勾选哪些，状态栏就显示哪些；选择自动记忆
+- **自动检测已配置的服务**：启动时探测本机凭证（Codex 的 OAuth token、GLM / OpenCode 的 API Key），菜单里列出所有检测到的 coding plan 及其状态，未配置的灰显并给出配置提示；也可点「重新检测可用服务」
+- **菜单勾选监控项**：取消勾选即从状态栏隐藏；新检测到的服务自动显示，选择自动记忆
 - **Codex（ChatGPT 订阅）**：5 小时窗口 + 每周窗口剩余百分比、重置倒计时、限流状态、套餐类型
 - **GLM Coding Plan（智谱）**：5 小时 + 每周积分余额（精确到点数）、套餐档位（lite/pro/max）、重置时间
-- **状态栏两列对齐**：标签列宽度取各行最宽值，无论数值多少，两行的百分比始终垂直对齐
+- **OpenCode Go（opencode.ai）**：滚动窗口 + 每周窗口剩余百分比与重置倒计时
+- **状态栏两列对齐**：标签列宽度取各行最宽值，无论数值多少，各行的百分比始终垂直对齐
 - **状态点三色**：🟢 余量 > 40%　🟡 11–40%　🔴 ≤ 10% 或已限流
 - 5 分钟自动刷新（可 ⌘R 手动），重置倒计时本地每 30 秒刷新
 - 零配置后台运行：无 Dock 图标、CPU 占用 ~0%、内存 ~50MB
@@ -74,28 +76,43 @@ export GLM_API_KEY="你的key"
 
 > 注意：这只影响 GLM 监控读哪个 key。额度按账号统计——监控哪个 key 就显示哪个账号的额度。
 
+### OpenCode Go
+
+app 默认按顺序读取 `OPENCODE_API_KEY` 环境变量和 `~/.hermes/.env` 中的 `OPENCODE_GO_API_KEY`。也可以显式设置：
+
+```bash
+launchctl setenv OPENCODE_API_KEY "你的key"
+```
+
+> 额度接口 `GET opencode.ai/zen/go/v1/usage` 由 OpenCode 官方提供但未公开文档，且位于 Cloudflare 之后——app 已内置浏览器 UA，普通请求会被 403 (error 1010) 拦截。
+
 ## 使用
 
 点击菜单栏图标：
 
 ```
 监控项（自动检测）:
-  ✓ Codex (ChatGPT 订阅) — 已检测到 (OAuth)
-  ✓ GLM Coding Plan (智谱) — 已检测到 (API Key)
+  ✓ Codex (ChatGPT 订阅) — 就绪 (ChatGPT 账号)
+  ✓ GLM Coding Plan (智谱) — 就绪 (API Key)
+  ✓ OpenCode Go (opencode.ai) — 就绪 (API Key)
 ────────────────
 Codex (ChatGPT 订阅)
   5h余 0%　7d余 84%　(team)　⚠️已限流
   5h重置 2:47:31　7d重置 6d 23h
 ────────────────
 GLM Coding Plan (智谱)
-  5h余 96% (26893/28000)　7d余 97% (135593/140000)　(max)
+  5h余 98% (27432/28000)　7d余 96% (135593/140000)　(max)
   5h重置 3:12:44　7d重置 6d 18h
+────────────────
+OpenCode Go (opencode.ai)
+  5h余 100%　7d余 42%
+  5h重置 0:04:12　7d重置 0d 7h
 ────────────────
 立即刷新      ⌘R
 重新检测可用服务
-更新于 下午4:04
+更新于 下午4:30
 ────────────────
-CodexQuota v1.2.0
+CodexQuota v1.3.0
 退出          ⌘Q
 ```
 

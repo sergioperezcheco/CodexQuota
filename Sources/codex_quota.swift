@@ -20,29 +20,32 @@ import Cocoa
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.2.0"
+    static let version = "1.3.0"
 
     // MARK: - Provider registry
 
     enum Source: String, CaseIterable {
-        case codex, glm
+        case codex, glm, opencode
 
         var label: String {        // short label in the status bar
             switch self {
-            case .codex: return "Codex"
-            case .glm:   return "GLM"
+            case .codex:    return "Codex"
+            case .glm:      return "GLM"
+            case .opencode: return "OpenCode"
             }
         }
         var menuName: String {     // full name in the menu
             switch self {
-            case .codex: return "Codex (ChatGPT 订阅)"
-            case .glm:   return "GLM Coding Plan (智谱)"
+            case .codex:    return "Codex (ChatGPT 订阅)"
+            case .glm:      return "GLM Coding Plan (智谱)"
+            case .opencode: return "OpenCode Go (opencode.ai)"
             }
         }
         var missingHint: String {
             switch self {
-            case .codex: return "未检测到 — 请先在本机登录 Codex CLI"
-            case .glm:   return "未检测到 — 未找到 API Key"
+            case .codex:    return "未配置 — 登录 Codex CLI 后点「重新扫描」"
+            case .glm:      return "未配置 — 设置 GLM_API_KEY 后点「重新扫描」"
+            case .opencode: return "未配置 — 设置 OPENCODE_API_KEY 后点「重新扫描」"
             }
         }
     }
@@ -67,10 +70,10 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Discovery
 
-    /// source → "已检测到(<detail>)" or "未检测到 — …" (populated at launch)
+    /// source → "就绪 (<detail>)" or "未配置 — …" (populated at launch)
     var discovery: [Source: String] = [:]
 
-    func isDetected(_ s: Source) -> Bool { discovery[s]?.hasPrefix("已检测到") == true }
+    func isDetected(_ s: Source) -> Bool { discovery[s]?.hasPrefix("就绪") == true }
 
     /// Probe local credential stores. File reads only — instant, no network.
     func detectSources() {
@@ -82,24 +85,26 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
            (tokens["access_token"] as? String)?.isEmpty == false {
             codexOK = true
         }
-        discovery[.codex] = codexOK ? "已检测到 (OAuth)" : Source.codex.missingHint
-
-        // GLM: API key in env or ~/.hermes/.env?
-        discovery[.glm] = (glmAPIKey() != nil) ? "已检测到 (API Key)" : Source.glm.missingHint
+        discovery[.codex] = codexOK ? "就绪 (ChatGPT 账号)" : Source.codex.missingHint
+        discovery[.glm] = (glmAPIKey() != nil) ? "就绪 (API Key)" : Source.glm.missingHint
+        discovery[.opencode] = (openCodeKey() != nil) ? "就绪 (API Key)" : Source.opencode.missingHint
     }
 
     // MARK: - Persistence
+    // "disabledSources" = sources the user explicitly hid. Everything else
+    // that is detected shows automatically — so a newly configured service
+    // appears in the bar without touching defaults.
 
-    var visible: Set<Source> {
+    var disabled: Set<Source> {
         get {
-            if let raw = UserDefaults.standard.stringArray(forKey: "visibleSources") {
-                return Set(raw.compactMap { Source(rawValue: $0) })
-            }
-            // first launch: show everything detected
-            return Set(Source.allCases.filter { isDetected($0) })
+            return Set((UserDefaults.standard.stringArray(forKey: "disabledSources") ?? [])
+                        .compactMap { Source(rawValue: $0) })
         }
-        set { UserDefaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "visibleSources") }
+        set { UserDefaults.standard.set(newValue.map(\.rawValue).sorted(), forKey: "disabledSources") }
     }
+
+    func isEnabled(_ s: Source) -> Bool { isDetected(s) && !disabled.contains(s) }
+    var visible: Set<Source> { Set(Source.allCases.filter { isEnabled($0) }) }
 
     // MARK: - Data model
 
@@ -116,9 +121,14 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var c5: Int; var cap5: Int
         var c7: Int; var cap7: Int
     }
+    struct GoData {
+        var r5: Int; var reset5Date: Date  // rolling window, remain %
+        var r7: Int; var reset7Date: Date  // weekly window, remain %
+    }
 
     var codex: CodexData?
     var glm: GlmData?
+    var opencode: GoData?
     var errors: [Source: String] = [:]
 
     // MARK: - Lifecycle
@@ -165,7 +175,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.target = self
             item.representedObject = s.rawValue
             item.isEnabled = detected
-            item.state = (detected && visible.contains(s)) ? .on : .off
+            item.state = (detected && !disabled.contains(s)) ? .on : .off
             toggleItems[s] = item
             menu.addItem(item)
         }
@@ -216,11 +226,15 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleSource(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let s = Source(rawValue: raw), isDetected(s) else { return }
-        var v = visible
-        if sender.state == .on { v.remove(s) } else { v.insert(s) }
-        if v.isEmpty { return }  // keep at least one line in the bar
-        visible = v
-        sender.state = v.contains(s) ? .on : .off
+        var d = disabled
+        if d.contains(s) {
+            d.remove(s)
+        } else {
+            if visible.count <= 1 { return }  // keep at least one line in the bar
+            d.insert(s)
+        }
+        disabled = d
+        sender.state = d.contains(s) ? .off : .on
         updateTitle()
     }
 
@@ -251,6 +265,13 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     lines.append((s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
                 }
+            case .opencode:
+                if let o = opencode {
+                    lines.append((s.label + ":", String(format: "%d%%|%d%%", o.r5, o.r7),
+                                  color(for: min(o.r5, o.r7), limitReached: false)))
+                } else {
+                    lines.append((s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
+                }
             }
         }
         statusItem.button?.image = titleImage(lines: lines)
@@ -259,14 +280,17 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func titleImage(lines: [(label: String, value: String, color: NSColor)]) -> NSImage {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
+        // the menu bar is ~24-30pt tall: 2 lines fit comfortably at 11pt leading,
+        // 3 lines need compact metrics (8pt leading / ~7.8pt font) to stay unclipped
+        let n = lines.count
+        let lineH: CGFloat = n <= 2 ? 11 : 8
+        let dotD: CGFloat = n <= 2 ? 4.5 : 3.4
+        let font = NSFont.monospacedDigitSystemFont(ofSize: n <= 2 ? 9.5 : 7.8, weight: .regular)
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 0
         para.alignment = .left
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: para]
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: para, .foregroundColor: NSColor.white]
 
-        let lineH: CGFloat = 11
-        let dotD: CGFloat = 4.5
         let labelX: CGFloat = dotD + 6.5
         // label column width = widest label → values align across lines
         let labelW = lines.map { ceil(($0.label as NSString).size(withAttributes: attrs).width) }.max() ?? 0
@@ -276,7 +300,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let img = NSImage(size: NSSize(width: valueX + valueW + 2, height: CGFloat(lines.count) * lineH))
         img.lockFocusFlipped(true)
         for (i, l) in lines.enumerated() {
-            let cy = CGFloat(i) * lineH + 5.75  // dot centered on glyph ink
+            let cy = CGFloat(i) * lineH + lineH * 0.52  // dot centered on glyph ink
             l.color.setFill()
             NSBezierPath(ovalIn: NSRect(x: 0, y: cy - dotD / 2, width: dotD, height: dotD)).fill()
             let y = CGFloat(i) * lineH - 0.5
@@ -299,12 +323,14 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             let c = self.isDetected(.codex) ? self.fetchCodex() : nil
             let g = self.isDetected(.glm) ? self.fetchGlm() : nil
+            let o = self.isDetected(.opencode) ? self.fetchOpenCode() : nil
             DispatchQueue.main.async(execute: { [weak self] in
                 guard let self else { return }
                 self.refreshItem?.isEnabled = true
                 if let q = c { self.codex = q }
                 if let q = g { self.glm = q }
-                if c != nil || g != nil { self.lastUpdate = Date() }
+                if let q = o { self.opencode = q }
+                if c != nil || g != nil || o != nil { self.lastUpdate = Date() }
                 self.updateTitle()
                 self.updateCountdown()
             })
@@ -341,6 +367,15 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     cd.title = String(format: "5h重置 %@　7d重置 %@",
                                       hms(max(0, Int(g.reset5Date.timeIntervalSinceNow))),
                                       dhm(max(0, Int(g.reset7Date.timeIntervalSinceNow))))
+                } else {
+                    info.title = errors[s] ?? "加载中…"; cd.title = ""
+                }
+            case .opencode:
+                if let o = opencode {
+                    info.title = "5h余 \(o.r5)%　7d余 \(o.r7)%"
+                    cd.title = String(format: "5h重置 %@　7d重置 %@",
+                                      hms(max(0, Int(o.reset5Date.timeIntervalSinceNow))),
+                                      dhm(max(0, Int(o.reset7Date.timeIntervalSinceNow))))
                 } else {
                     info.title = errors[s] ?? "加载中…"; cd.title = ""
                 }
@@ -471,6 +506,60 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
         case .failure(let e):
             errors[.glm] = e.localizedDescription
+            return nil
+        }
+    }
+
+    // MARK: - OpenCode Go (opencode.ai) fetcher
+
+    func openCodeKey() -> String? {
+        // 1) standard env var used by OpenCode tooling
+        if let v = ProcessInfo.processInfo.environment["OPENCODE_API_KEY"], !v.isEmpty { return v }
+        // 2) Hermes-style env files (~/.hermes/.env)
+        if let raw = fm.contents(atPath: envPath), let s = String(data: raw, encoding: .utf8) {
+            for ln in s.split(separator: "\n") {
+                for name in ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"] where ln.hasPrefix("\(name)=") {
+                    let v = ln.dropFirst(name.count + 1).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !v.isEmpty { return v }
+                }
+            }
+        }
+        return nil
+    }
+
+    func fetchOpenCode() -> GoData? {
+        guard let key = openCodeKey() else {
+            errors[.opencode] = "未找到 OpenCode key"
+            return nil
+        }
+        // opencode.ai sits behind Cloudflare — a browser UA is required
+        // (plain URL clients get 403 error 1010).
+        let headers: [String: String] = [
+            "Authorization": "Bearer \(key)",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ]
+        switch httpGetJSON(url: "https://opencode.ai/zen/go/v1/usage", headers: headers) {
+        case .success(let p):
+            guard let u = p["usage"] as? [String: Any],
+                  let rolling = u["rolling"] as? [String: Any],
+                  let weekly = u["weekly"] as? [String: Any] else {
+                errors[.opencode] = "响应格式不符"
+                return nil
+            }
+            func window(_ w: [String: Any]) -> (Int, Date) {
+                let used = (w["percent"] as? Int) ?? Int((w["percent"] as? Double) ?? 0)
+                let iso = (w["resetsAt"] as? String) ?? ""
+                let fmt = ISO8601DateFormatter()
+                fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let date = fmt.date(from: iso) ?? Date(timeIntervalSinceNow: 0)
+                return (max(0, 100 - used), date)
+            }
+            let (r5, d5) = window(rolling)
+            let (r7, d7) = window(weekly)
+            errors[.opencode] = nil
+            return GoData(r5: r5, reset5Date: d5, r7: r7, reset7Date: d7)
+        case .failure(let e):
+            errors[.opencode] = e.localizedDescription
             return nil
         }
     }
