@@ -1,4 +1,5 @@
 import Cocoa
+import ServiceManagement
 
 // CodexQuota — macOS menu bar quota monitor for AI coding subscriptions.
 //
@@ -20,7 +21,7 @@ import Cocoa
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.3.0"
+    static let version = "1.4.0"
 
     // MARK: - Provider registry
 
@@ -55,6 +56,8 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     let menu = NSMenu()
     var refreshItem: NSMenuItem!
+    var redetectItem: NSMenuItem!
+    var updateItem: NSMenuItem!
     var lastUpdateItem: NSMenuItem!
     var toggleItems: [Source: NSMenuItem] = [:]
     var infoItems: [Source: NSMenuItem] = [:]
@@ -63,10 +66,25 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let fm = FileManager.default
     let authPath = NSString(string: "~/.codex/auth.json").expandingTildeInPath
     let envPath = NSString(string: "~/.hermes/.env").expandingTildeInPath
+    let repoURL = "https://github.com/sergioperezcheco/CodexQuota"
     var timer: Timer?
     var countdownTimer: Timer?
     var lastUpdate: Date?
     var refreshWorkItem: DispatchWorkItem?
+
+    /// refresh interval in seconds (persisted; default 5 min)
+    var refreshSeconds: Int {
+        get {
+            let v = UserDefaults.standard.integer(forKey: "refreshSeconds")
+            return [60, 300, 600, 900, 1800].contains(v) ? v : 300
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "refreshSeconds") }
+    }
+
+    func scheduleRefreshTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(refreshSeconds), repeats: true) { [weak self] _ in self?.refresh() }
+    }
 
     // MARK: - Discovery
 
@@ -142,7 +160,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTitle()
         updateCountdown()
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
+        scheduleRefreshTimer()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.updateCountdown() }
     }
 
@@ -196,10 +214,33 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshItem.isEnabled = true
         menu.addItem(refreshItem)
 
-        let redetect = NSMenuItem(title: "重新检测可用服务", action: #selector(redetect), keyEquivalent: "")
-        redetect.target = self
-        redetect.isEnabled = true
-        menu.addItem(redetect)
+        // ── settings: refresh interval / launch at login / self-update
+        menu.addItem(plain("刷新间隔:"))
+        let intervals: [(String, Int)] = [("1 分钟", 60), ("5 分钟", 300), ("10 分钟", 600), ("15 分钟", 900), ("30 分钟", 1800)]
+        for (name, secs) in intervals {
+            let item = NSMenuItem(title: name, action: #selector(setRefreshInterval(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = secs
+            item.state = refreshSeconds == secs ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+
+        let login = NSMenuItem(title: "开机自启动", action: #selector(toggleLogin), keyEquivalent: "")
+        login.target = self
+        login.state = loginItemEnabled ? .on : .off
+        menu.addItem(login)
+
+        let update = NSMenuItem(title: "立即更新", action: #selector(checkForUpdate), keyEquivalent: "u")
+        update.target = self
+        update.isEnabled = true
+        updateItem = update
+        menu.addItem(update)
+
+        redetectItem = NSMenuItem(title: "重新检测可用服务", action: #selector(redetect), keyEquivalent: "")
+        redetectItem.target = self
+        redetectItem.isEnabled = true
+        menu.addItem(redetectItem)
 
         lastUpdateItem = plain("")
         menu.addItem(lastUpdateItem)
@@ -219,6 +260,156 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTitle()
         updateCountdown()
         refresh()
+    }
+
+    // MARK: - Refresh interval
+
+    @objc func setRefreshInterval(_ sender: NSMenuItem) {
+        guard let secs = sender.representedObject as? Int else { return }
+        refreshSeconds = secs
+        scheduleRefreshTimer()
+        rebuildMenu()  // update checkmarks
+    }
+
+    // MARK: - Launch at login (SMAppService, macOS 13+)
+
+    var loginItemEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    @objc func toggleLogin(_ sender: NSMenuItem) {
+        let target = !loginItemEnabled
+        do {
+            if target { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = target ? "注册开机自启动失败" : "取消开机自启动失败"
+            alert.informativeText = "可在 系统设置 → 通用 → 登录项 中手动管理。\n\(error)"
+            alert.runModal()
+        }
+        sender.state = loginItemEnabled ? .on : .off
+    }
+
+    // MARK: - Self-update
+    // Compares Info.plist CFBundleShortVersionString with the repo's latest
+    // release tag. To upgrade: downloads the repo tarball, rebuilds, swaps the
+    // binary+plist in place, relaunches. Old app untouched on any failure.
+
+    @objc func checkForUpdate() {
+        updateItem?.title = "检查更新中…"
+        updateItem?.isEnabled = false
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let result = self.performUpdateCheck()
+            DispatchQueue.main.async {
+                self.updateItem?.isEnabled = true
+                let alert = NSAlert()
+                switch result {
+                case .upToDate:
+                    self.updateItem?.title = "立即更新"
+                    alert.messageText = "已是最新版本"
+                    alert.informativeText = "当前 v\(AppState.version)，远端最新 v\(self.remoteVersion ?? AppState.version)。"
+                case .updated(let v):
+                    self.updateItem?.title = "立即更新"
+                    alert.messageText = "已更新到 v\(v)，应用即将重启。"
+                case .failed(let msg):
+                    self.updateItem?.title = "重试更新"
+                    alert.messageText = "更新失败"
+                    alert.informativeText = msg
+                }
+                alert.runModal()
+            }
+        }
+    }
+
+    enum UpdateResult {
+        case upToDate
+        case updated(String)
+        case failed(String)
+    }
+
+    var remoteVersion: String?
+    var lastRemoteCheck: Date?
+
+    func latestRemoteVersion() -> String? {
+        // cached for 10 min within one session
+        if let v = remoteVersion, let t = lastRemoteCheck, Date().timeIntervalSince(t) < 600 { return v }
+        guard let url = URL(string: "\(repoURL)/releases/latest") else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.httpMethod = "HEAD"
+        var finalURL: URL?
+        let sem = DispatchSemaphore(value: 0)
+        // "…/releases/latest" 302s to "…/releases/tag/vX.Y.Z" — read the final URL
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            finalURL = (resp as? HTTPURLResponse)?.url
+            sem.signal()
+        }.resume()
+        sem.wait()
+        guard let last = finalURL?.lastPathComponent, last.hasPrefix("v") else { return nil }
+        remoteVersion = String(last.dropFirst())
+        lastRemoteCheck = Date()
+        return remoteVersion
+    }
+
+    func performUpdateCheck() -> UpdateResult {
+        guard let remote = latestRemoteVersion() else {
+            return .failed("无法获取远端版本（检查网络 / 仓库地址）。")
+        }
+        func parts(_ v: String) -> [Int] { v.split(separator: ".").map { Int($0) ?? 0 } }
+        if parts(remote).lexicographicallyPrecedes(parts(AppState.version)) ||
+           parts(remote) == parts(AppState.version) {
+            return .upToDate
+        }
+        // download + rebuild
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("CodexQuota-update-\(Int(Date().timeIntervalSince1970))")
+        do {
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+            let tar = work.appendingPathComponent("repo.tar.gz")
+            try? Data(contentsOf: URL(string: "\(repoURL)/archive/refs/heads/main.tar.gz")!)
+                .write(to: tar)
+            let srcDir = work.appendingPathComponent("src")
+            try fm.createDirectory(at: srcDir, withIntermediateDirectories: true)
+            try run("/usr/bin/tar", ["-xzf", tar.path, "-C", srcDir.path, "--strip-components", "1"])
+            let bin = work.appendingPathComponent("CodexQuota")
+            try run("/usr/bin/swiftc", ["-O", "-o", bin.path,
+                                        srcDir.appendingPathComponent("Sources/codex_quota.swift").path])
+            // install
+            let appPath = Bundle.main.bundlePath
+            let contents = srcDir.appendingPathComponent("Info.plist")
+            let dest = URL(fileURLWithPath: appPath)
+            try? fm.removeItem(at: dest.appendingPathComponent("Contents/MacOS/CodexQuota"))
+            try fm.copyItem(at: bin, to: dest.appendingPathComponent("Contents/MacOS/CodexQuota"))
+            try? fm.removeItem(at: dest.appendingPathComponent("Contents/Info.plist"))
+            try fm.copyItem(at: contents, to: dest.appendingPathComponent("Contents/Info.plist"))
+            // relaunch via open(1) after a short delay, then exit
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let script = "sleep 1; kill \(pid); open \(appPath)"
+            let relaunch = Process()
+            relaunch.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            relaunch.arguments = ["-c", script]
+            try relaunch.run()
+            return .updated(remote)
+        } catch {
+            return .failed("\(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func run(_ path: String, _ args: [String]) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard p.terminationStatus == 0 else {
+            throw NSError(domain: "cq", code: 9,
+                          userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "命令失败"])
+        }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     @objc func toggleSource(_ sender: NSMenuItem) {
