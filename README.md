@@ -10,6 +10,8 @@
 
 白色等宽文字 + 彩色状态点，与 macOS 菜单栏原生风格一致。同一状态项内多行叠显，每个被监控的服务占一行，点击菜单即可勾选显示哪些。
 
+<p align="center"><img src="docs/screenshot-menu.png" alt="CodexQuota 菜单截图" width="420"></p>
+
 ## 功能
 
 - **自动检测已配置的服务**：启动时探测本机凭证（Codex 的 OAuth token、GLM / OpenCode 的 API Key），菜单里列出所有检测到的 coding plan 及其状态，未配置的灰显并给出配置提示；也可点「重新检测可用服务」
