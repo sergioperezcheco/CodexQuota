@@ -92,9 +92,9 @@ launchctl setenv OPENCODE_API_KEY "你的key"
 
 ```
 监控项（自动检测）:
-  ✓ Codex (ChatGPT 订阅) — 就绪 (ChatGPT 账号)
-  ✓ GLM Coding Plan (智谱) — 就绪 (API Key)
-  ✓ OpenCode Go (opencode.ai) — 就绪 (API Key)
+  ✓ Codex (ChatGPT 订阅)
+  ✓ GLM Coding Plan (智谱)
+  ✓ OpenCode Go (opencode.ai)
 ────────────────
 Codex (ChatGPT 订阅)
   5h余 0%　7d余 84%　(team)　⚠️已限流

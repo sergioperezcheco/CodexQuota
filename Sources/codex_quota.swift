@@ -70,24 +70,22 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Discovery
 
-    /// source → "就绪 (<detail>)" or "未配置 — …" (populated at launch)
-    var discovery: [Source: String] = [:]
+    /// sources whose credentials were found locally (populated at launch)
+    var detectedSources: Set<Source> = []
 
-    func isDetected(_ s: Source) -> Bool { discovery[s]?.hasPrefix("就绪") == true }
+    func isDetected(_ s: Source) -> Bool { detectedSources.contains(s) }
 
     /// Probe local credential stores. File reads only — instant, no network.
     func detectSources() {
         // Codex: OAuth token present in ~/.codex/auth.json?
-        var codexOK = false
         if let raw = fm.contents(atPath: authPath),
            let obj = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any],
            let tokens = obj["tokens"] as? [String: Any],
            (tokens["access_token"] as? String)?.isEmpty == false {
-            codexOK = true
+            detectedSources.insert(.codex)
         }
-        discovery[.codex] = codexOK ? "就绪 (ChatGPT 账号)" : Source.codex.missingHint
-        discovery[.glm] = (glmAPIKey() != nil) ? "就绪 (API Key)" : Source.glm.missingHint
-        discovery[.opencode] = (openCodeKey() != nil) ? "就绪 (API Key)" : Source.opencode.missingHint
+        if glmAPIKey() != nil { detectedSources.insert(.glm) }
+        if openCodeKey() != nil { detectedSources.insert(.opencode) }
     }
 
     // MARK: - Persistence
@@ -168,7 +166,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for s in Source.allCases {
             let detected = isDetected(s)
             let item = NSMenuItem(
-                title: "\(s.menuName) — \(discovery[s] ?? "…")",
+                title: detected ? s.menuName : "\(s.menuName) — \(s.missingHint)",
                 action: detected ? #selector(toggleSource(_:)) : nil,
                 keyEquivalent: ""
             )
@@ -349,7 +347,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for s in Source.allCases {
             guard let info = infoItems[s], let cd = countdownItems[s] else { continue }
             if !isDetected(s) {
-                info.title = discovery[s] ?? ""
+                info.title = s.missingHint
                 cd.title = ""
                 continue
             }
