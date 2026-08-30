@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # CodexQuota one-line installer
-#   curl -fsSL https://raw.githubusercontent.com/<org>/CodexQuota/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/sergioperezcheco/CodexQuota/main/scripts/install.sh | bash
 set -euo pipefail
 
-REPO_URL="${CODEXQUOTA_REPO:-https://github.com/checodev/CodexQuota.git}"
+REPO_URL="${CODEXQUOTA_REPO:-https://github.com/sergioperezcheco/CodexQuota.git}"
 INSTALL_DIR="/Applications"
 BRANCH="main"
 

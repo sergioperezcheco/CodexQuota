@@ -29,7 +29,7 @@
 ### 方式一：一条命令安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-org>/CodexQuota/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sergioperezcheco/CodexQuota/main/scripts/install.sh | bash
 ```
 
 脚本做的事：`git clone` → `swiftc` 编译（需要 Xcode Command Line Tools）→ 打包 `.app` → 放入 `/Applications` → 启动并注册登录项。全程约 30 秒。
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/<your-org>/CodexQuota/main/scripts/
 ### 方式二：手动安装
 
 ```bash
-git clone https://github.com/<your-org>/CodexQuota.git
+git clone https://github.com/sergioperezcheco/CodexQuota.git
 cd CodexQuota
 # 首次编译需要 Xcode Command Line Tools: xcode-select --install
 swiftc -O -o CodexQuota Sources/codex_quota.swift
