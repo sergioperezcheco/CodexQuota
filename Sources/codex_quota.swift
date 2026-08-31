@@ -21,7 +21,7 @@ import ServiceManagement
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.4.1"
+    static let version = "1.4.2"
 
     // MARK: - Provider registry
 
@@ -500,6 +500,13 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let img = NSImage(size: NSSize(width: valueX + valueW + 2, height: CGFloat(lines.count) * lineH))
         img.lockFocusFlipped(true)
+        // split "98%|100%" → right-align the part before the pipe into its own
+        // sub-column so the pipe lands on the same x on every line, whatever
+        // the digit counts
+        let split = lines.map { ($0.value as NSString).components(separatedBy: "|") }
+        let p1W = split.map { ceil(((($0.first ?? "") as NSString).size(withAttributes: attrs)).width) }.max() ?? 0
+        let pipeW = ceil(("|" as NSString).size(withAttributes: attrs).width)
+        let pipeX = valueX + p1W + 1
         for (i, l) in lines.enumerated() {
             let cy = CGFloat(i) * lineH + lineH * 0.52  // dot centered on glyph ink
             l.color.setFill()
@@ -507,8 +514,16 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let y = CGFloat(i) * lineH - 0.5
             (l.label as NSString).draw(in: NSRect(x: labelX, y: y, width: labelW + 4, height: lineH),
                                        withAttributes: attrs)
-            (l.value as NSString).draw(in: NSRect(x: valueX, y: y, width: valueW + 2, height: lineH),
+            let parts = split[i]
+            let p1 = (parts.first ?? "") as NSString
+            p1.draw(in: NSRect(x: pipeX - ceil(p1.size(withAttributes: attrs).width) - 1, y: y, width: p1W + 2, height: lineH),
+                    withAttributes: attrs)
+            if parts.count > 1 {
+                ("|" as NSString).draw(in: NSRect(x: pipeX, y: y, width: pipeW + 1, height: lineH),
                                        withAttributes: attrs)
+                ((parts[1]) as NSString).draw(in: NSRect(x: pipeX + pipeW + 1, y: y, width: valueW + 2, height: lineH),
+                                              withAttributes: attrs)
+            }
         }
         img.unlockFocus()
         img.isTemplate = false  // keep colors on the dark menu bar
