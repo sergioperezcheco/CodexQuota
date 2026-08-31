@@ -21,7 +21,7 @@ import ServiceManagement
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.4.0"
+    static let version = "1.4.1"
 
     // MARK: - Provider registry
 
@@ -162,6 +162,16 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         scheduleRefreshTimer()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.updateCountdown() }
+        ensureDefaultLoginItem()
+    }
+
+    /// Launch-at-login defaults to ON: register on first run unless the user
+    /// has explicitly opted out from the menu.
+    func ensureDefaultLoginItem() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: "loginOptOut") else { return }   // user turned it off
+        guard SMAppService.mainApp.status != .enabled else { return }
+        try? SMAppService.mainApp.register()                   // best-effort, no prompt
     }
 
     func menuWillOpen(_ menu: NSMenu) { updateCountdown() }
@@ -281,6 +291,8 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let target = !loginItemEnabled
         do {
             if target { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            // remember the user's explicit choice so the default-on logic respects it
+            UserDefaults.standard.set(!target, forKey: "loginOptOut")
         } catch {
             let alert = NSAlert()
             alert.messageText = target ? "注册开机自启动失败" : "取消开机自启动失败"
