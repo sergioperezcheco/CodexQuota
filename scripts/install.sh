@@ -40,6 +40,11 @@ mkdir -p "$TMP/CodexQuota.app/Contents/MacOS"
 cp "$TMP/CodexQuota" "$TMP/CodexQuota.app/Contents/MacOS/CodexQuota"
 cp Info.plist "$TMP/CodexQuota.app/Contents/Info.plist"
 
+# Ad-hoc sign the bundle. An unsigned/linker-signed bundle makes
+# SMAppService.mainApp.register() fail → launch-at-login silently broken.
+log "签名 …"
+codesign --force --deep --sign - "$TMP/CodexQuota.app" || fail "codesign 失败"
+
 # ── Install ──────────────────────────────────────────────────────────────
 log "安装到 $INSTALL_DIR …"
 if [ -d "$INSTALL_DIR/CodexQuota.app" ]; then
@@ -48,17 +53,11 @@ if [ -d "$INSTALL_DIR/CodexQuota.app" ]; then
 fi
 cp -R "$TMP/CodexQuota.app" "$INSTALL_DIR/" || fail "复制到 $INSTALL_DIR 失败（权限不足？尝试 sudo 或改 INSTALL_DIR）"
 
-# ── Launch + login item ─────────────────────────────────────────────────
+# ── Launch ───────────────────────────────────────────────────────────────
 log "启动 CodexQuota …"
 open "$INSTALL_DIR/CodexQuota.app"
-
-osascript <<'EOF' 2>/dev/null && log "已注册开机自启动（登录项）" || log "注册登录项失败，可稍后在 系统设置→登录项 手动添加"
-tell application "System Events"
-    if not (exists login item "CodexQuota") then
-        make login item at end with properties {path:"/Applications/CodexQuota.app", name:"CodexQuota", hidden:true}
-    end if
-end tell
-EOF
+# The app registers itself as a login item on first launch (SMAppService,
+# with an automatic LaunchAgent fallback if registration fails).
 
 cat <<'EOF'
 

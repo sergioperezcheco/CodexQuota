@@ -21,7 +21,7 @@ import ServiceManagement
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.4.2"
+    static let version = "1.4.3"
 
     // MARK: - Provider registry
 
@@ -171,7 +171,61 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let d = UserDefaults.standard
         guard !d.bool(forKey: "loginOptOut") else { return }   // user turned it off
         guard SMAppService.mainApp.status != .enabled else { return }
-        try? SMAppService.mainApp.register()                   // best-effort, no prompt
+        do {
+            try SMAppService.mainApp.register()
+            removeLaunchAgentFallback()      // native mechanism works → drop legacy agent
+        } catch {
+            // register() throws on ad-hoc/broken signatures (err=4); fall back
+            // to a LaunchAgent so launch-at-login still works.
+            installLaunchAgentFallback()
+        }
+    }
+
+    // MARK: - LaunchAgent fallback (signature-proof login mechanism)
+
+    var launchAgentURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.checo.CodexQuota.plist")
+    }
+
+    var launchAgentInstalled: Bool {
+        FileManager.default.fileExists(atPath: launchAgentURL.path)
+    }
+
+    func installLaunchAgentFallback() {
+        let appPath = Bundle.main.bundlePath
+        guard appPath.hasSuffix(".app") else { return }
+        let body = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key><string>com.checo.CodexQuota</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/usr/bin/open</string>
+                <string>-a</string>
+                <string>\(appPath)</string>
+            </array>
+            <key>RunAtLoad</key><true/>
+        </dict>
+        </plist>
+        """
+        do {
+            try FileManager.default.createDirectory(at: launchAgentURL.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try body.write(to: launchAgentURL, atomically: true, encoding: .utf8)
+            try run("/bin/launchctl", ["bootstrap", "gui/\(getuid())", launchAgentURL.path])
+        } catch {
+            // already bootstrapped (EEXIST) is fine; make sure the label is enabled
+            _ = try? run("/bin/launchctl", ["enable", "gui/\(getuid())/com.checo.CodexQuota"])
+        }
+    }
+
+    func removeLaunchAgentFallback() {
+        guard launchAgentInstalled else { return }
+        _ = try? run("/bin/launchctl", ["bootout", "gui/\(getuid())/com.checo.CodexQuota"])
+        try? FileManager.default.removeItem(at: launchAgentURL)
     }
 
     func menuWillOpen(_ menu: NSMenu) { updateCountdown() }
@@ -284,19 +338,33 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Launch at login (SMAppService, macOS 13+)
 
     var loginItemEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+        if SMAppService.mainApp.status == .enabled { return true }
+        return launchAgentInstalled          // LaunchAgent fallback counts as on
     }
 
     @objc func toggleLogin(_ sender: NSMenuItem) {
         let target = !loginItemEnabled
-        do {
-            if target { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            // remember the user's explicit choice so the default-on logic respects it
-            UserDefaults.standard.set(!target, forKey: "loginOptOut")
-        } catch {
+        var ok = false
+        if target {
+            do {
+                try SMAppService.mainApp.register()
+                removeLaunchAgentFallback()  // prefer the native mechanism
+                ok = true
+            } catch {
+                installLaunchAgentFallback() // signature-proof fallback
+                ok = loginItemEnabled
+            }
+        } else {
+            try? SMAppService.mainApp.unregister()
+            removeLaunchAgentFallback()
+            ok = !loginItemEnabled
+        }
+        // remember the user's explicit choice so the default-on logic respects it
+        UserDefaults.standard.set(!target, forKey: "loginOptOut")
+        if target && !ok {
             let alert = NSAlert()
-            alert.messageText = target ? "注册开机自启动失败" : "取消开机自启动失败"
-            alert.informativeText = "可在 系统设置 → 通用 → 登录项 中手动管理。\n\(error)"
+            alert.messageText = "注册开机自启动失败"
+            alert.informativeText = "可在 系统设置 → 通用 → 登录项 中手动管理。"
             alert.runModal()
         }
         sender.state = loginItemEnabled ? .on : .off
@@ -393,6 +461,10 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try fm.copyItem(at: bin, to: dest.appendingPathComponent("Contents/MacOS/CodexQuota"))
             try? fm.removeItem(at: dest.appendingPathComponent("Contents/Info.plist"))
             try fm.copyItem(at: contents, to: dest.appendingPathComponent("Contents/Info.plist"))
+            // Re-sign the modified bundle. Swapping only the binary leaves a
+            // linker-signed executable with unsealed resources; SMAppService
+            // register() then fails and launch-at-login silently breaks.
+            _ = try? run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", dest.path])
             // relaunch via open(1) after a short delay, then exit
             let pid = ProcessInfo.processInfo.processIdentifier
             let script = "sleep 1; kill \(pid); open \(appPath)"

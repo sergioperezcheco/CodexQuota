@@ -57,7 +57,7 @@ cp -r CodexQuota.app /Applications/
 open /Applications/CodexQuota.app
 ```
 
-如需开机自启动：系统设置 → 通用 → 登录项 → 添加 CodexQuota。
+开机自启动默认开启：首次启动自动注册登录项（SMAppService，带 LaunchAgent 兜底），可在系统设置 → 通用 → 登录项中查看，或在 app 菜单里一键关闭。
 
 ## 配置
 
