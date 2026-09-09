@@ -5,6 +5,7 @@
 ```
  🔴 Codex:0%|84%      ← 红点 = 5小时窗口已用满
  🟢 GLM:98%|96%
+ 🟢 GLM2:93%|90%      ← 第二个 GLM 账号（检测到才显示）
  🟢 OpenCode:100%|42%
 ```
 
@@ -20,7 +21,7 @@
 - **开机自启动开关**：菜单里一键开关（SMAppService，可在系统设置 → 登录项中看到）
 - **应用自更新**：点「立即更新」自动检查 GitHub 最新 release，有新版则下载源码、本机重编译、原地替换并重启，全程无需重装
 - **Codex（ChatGPT 订阅）**：5 小时窗口 + 每周窗口剩余百分比、重置倒计时、限流状态、套餐类型
-- **GLM Coding Plan（智谱）**：5 小时 + 每周积分余额（精确到点数）、套餐档位（lite/pro/max）、重置时间
+- **GLM Coding Plan（智谱）**：5 小时 + 每周积分余额（精确到点数）、套餐档位（lite/pro/max）、重置时间；支持第二个账号（GLM2），点数制 / 百分比制两种套餐结构自动适配
 - **OpenCode Go（opencode.ai）**：滚动窗口 + 每周窗口剩余百分比与重置倒计时
 - **状态栏两列对齐**：标签列宽度取各行最宽值，无论数值多少，各行的百分比始终垂直对齐
 - **状态点三色**：🟢 余量 > 40%　🟡 11–40%　🔴 ≤ 10% 或已限流
@@ -81,6 +82,18 @@ export GLM_API_KEY="你的key"
 
 > 注意：这只影响 GLM 监控读哪个 key。额度按账号统计——监控哪个 key 就显示哪个账号的额度。
 
+### 第二个 GLM 账号（GLM2）
+
+有多个 GLM Coding Plan 时，备用账号会显示为 **GLM2** 独立一行。默认从 `~/.hermes/.env` 读取 `CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY`，也可用环境变量覆盖：
+
+```bash
+launchctl setenv GLM_ALT_API_KEY "第二个账号的key"
+```
+
+优先级：`GLM_ALT_API_KEY` 环境变量 > `~/.hermes/.env` 中的 `CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY`。
+
+> 兼容说明：GLM 的额度接口对不同套餐返回两种结构——`CREDIT_LIMIT`（点数制，显示精确点数）和 `TOKENS_LIMIT`（百分比制，只显示百分比）。两种都支持，按账号实际返回自动适配。
+
 ### OpenCode Go
 
 app 默认按顺序读取 `OPENCODE_API_KEY` 环境变量和 `~/.hermes/.env` 中的 `OPENCODE_GO_API_KEY`。也可以显式设置：
@@ -99,6 +112,7 @@ launchctl setenv OPENCODE_API_KEY "你的key"
 监控项（自动检测）:
   ✓ Codex (ChatGPT 订阅)
   ✓ GLM Coding Plan (智谱)
+  ✓ GLM Coding Plan (智谱·备用)
   ✓ OpenCode Go (opencode.ai)
 ────────────────
 Codex (ChatGPT 订阅)
@@ -108,6 +122,10 @@ Codex (ChatGPT 订阅)
 GLM Coding Plan (智谱)
   5h余 98% (27432/28000)　7d余 96% (135593/140000)　(max)
   5h重置 3:12:44　7d重置 6d 18h
+────────────────
+GLM Coding Plan (智谱·备用)
+  5h余 93%　7d余 90%　(max)
+  5h重置 2:10:05　7d重置 4d 22h
 ────────────────
 OpenCode Go (opencode.ai)
   5h余 100%　7d余 42%
@@ -138,6 +156,7 @@ CodexQuota v1.4.0
 |---|---|---|
 | Codex | `GET chatgpt.com/backend-api/wham/usage` | `~/.codex/auth.json` 的 OAuth access_token |
 | GLM | `GET open.bigmodel.cn/api/monitor/usage/quota/limit` | GLM Coding Plan API Key |
+| GLM2（第二账号） | 同上 | `GLM_ALT_API_KEY` / `CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY` |
 
 两个都是官方接口、纯 GET、只读。app 不收集、不上传任何数据；所有请求直接从你的机器发往对应服务。
 

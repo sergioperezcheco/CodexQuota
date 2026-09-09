@@ -11,6 +11,8 @@ import ServiceManagement
 //     Credential: ~/.codex/auth.json → tokens.access_token (+ chatgpt-account-id)
 //   • GLM Coding Plan (Zhipu) : GET https://open.bigmodel.cn/api/monitor/usage/quota/limit
 //     Credential: GLM_API_KEY env var, or CUSTOM_OPEN_BIGMODEL_CN_API_KEY in ~/.hermes/.env
+//     A second GLM account is supported too (shown as "GLM2"): GLM_ALT_API_KEY
+//     env var, or CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY in ~/.hermes/.env
 //
 // Adding a new provider: add a case to `Source`, a branch in `detectSources()`
 // and `refresh()`/`fetch…()`. Everything else (menu, persistence, rendering)
@@ -21,17 +23,18 @@ import ServiceManagement
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.4.3"
+    static let version = "1.5.0"
 
     // MARK: - Provider registry
 
     enum Source: String, CaseIterable {
-        case codex, glm, opencode
+        case codex, glm, glmAlt, opencode
 
         var label: String {        // short label in the status bar
             switch self {
             case .codex:    return "Codex"
             case .glm:      return "GLM"
+            case .glmAlt:   return "GLM2"
             case .opencode: return "OpenCode"
             }
         }
@@ -39,6 +42,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch self {
             case .codex:    return "Codex (ChatGPT 订阅)"
             case .glm:      return "GLM Coding Plan (智谱)"
+            case .glmAlt:   return "GLM Coding Plan (智谱·备用)"
             case .opencode: return "OpenCode Go (opencode.ai)"
             }
         }
@@ -46,6 +50,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch self {
             case .codex:    return "未配置 — 登录 Codex CLI 后点「重新扫描」"
             case .glm:      return "未配置 — 设置 GLM_API_KEY 后点「重新扫描」"
+            case .glmAlt:   return "未配置 — 设置 GLM_ALT_API_KEY 后点「重新扫描」"
             case .opencode: return "未配置 — 设置 OPENCODE_API_KEY 后点「重新扫描」"
             }
         }
@@ -103,6 +108,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             detectedSources.insert(.codex)
         }
         if glmAPIKey() != nil { detectedSources.insert(.glm) }
+        if glmAltAPIKey() != nil { detectedSources.insert(.glmAlt) }
         if openCodeKey() != nil { detectedSources.insert(.opencode) }
     }
 
@@ -144,6 +150,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var codex: CodexData?
     var glm: GlmData?
+    var glmAlt: GlmData?
     var opencode: GoData?
     var errors: [Source: String] = [:]
 
@@ -531,8 +538,9 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     lines.append((s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
                 }
-            case .glm:
-                if let g = glm {
+            case .glm, .glmAlt:
+                let g = s == .glm ? glm : glmAlt
+                if let g {
                     lines.append((s.label + ":", String(format: "%d%%|%d%%", g.r5, g.r7),
                                   color(for: min(g.r5, g.r7), limitReached: false)))
                 } else {
@@ -553,12 +561,14 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func titleImage(lines: [(label: String, value: String, color: NSColor)]) -> NSImage {
-        // the menu bar is ~24-30pt tall: 2 lines fit comfortably at 11pt leading,
-        // 3 lines need compact metrics (8pt leading / ~7.8pt font) to stay unclipped
+        // the menu bar is ~30pt tall: 2 lines fit comfortably at 11pt leading,
+        // 3 lines need compact metrics (8pt leading / ~7.8pt font); 4 lines only
+        // fit with tighter leading (7.3pt / ~7.1pt font) or they get clipped
         let n = lines.count
-        let lineH: CGFloat = n <= 2 ? 11 : 8
-        let dotD: CGFloat = n <= 2 ? 4.5 : 3.4
-        let font = NSFont.monospacedDigitSystemFont(ofSize: n <= 2 ? 9.5 : 7.8, weight: .regular)
+        let lineH: CGFloat = n <= 2 ? 11 : (n == 3 ? 8 : 7.3)
+        let dotD: CGFloat = n <= 2 ? 4.5 : (n == 3 ? 3.4 : 3.0)
+        let fontSize: CGFloat = n <= 2 ? 9.5 : (n == 3 ? 7.8 : 7.1)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .regular)
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 0
         para.alignment = .left
@@ -610,15 +620,16 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             let c = self.isDetected(.codex) ? self.fetchCodex() : nil
-            let g = self.isDetected(.glm) ? self.fetchGlm() : nil
+            let (g, g2) = self.fetchGlmPair()
             let o = self.isDetected(.opencode) ? self.fetchOpenCode() : nil
             DispatchQueue.main.async(execute: { [weak self] in
                 guard let self else { return }
                 self.refreshItem?.isEnabled = true
                 if let q = c { self.codex = q }
                 if let q = g { self.glm = q }
+                if let q = g2 { self.glmAlt = q }
                 if let q = o { self.opencode = q }
-                if c != nil || g != nil || o != nil { self.lastUpdate = Date() }
+                if c != nil || g != nil || g2 != nil || o != nil { self.lastUpdate = Date() }
                 self.updateTitle()
                 self.updateCountdown()
             })
@@ -649,9 +660,14 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 } else {
                     info.title = errors[s] ?? "加载中…"; cd.title = ""
                 }
-            case .glm:
-                if let g = glm {
-                    info.title = "5h余 \(g.r5)% (\(g.c5)/\(g.cap5))　7d余 \(g.r7)% (\(g.c7)/\(g.cap7))　(\(g.level))"
+            case .glm, .glmAlt:
+                let g = s == .glm ? glm : glmAlt
+                if let g {
+                    // point counts only exist on CREDIT_LIMIT plans; TOKENS_LIMIT
+                    // plans show bare percentages
+                    let p5 = g.cap5 > 0 ? " (\(g.c5)/\(g.cap5))" : ""
+                    let p7 = g.cap7 > 0 ? " (\(g.c7)/\(g.cap7))" : ""
+                    info.title = "5h余 \(g.r5)%\(p5)　7d余 \(g.r7)%\(p7)　(\(g.level))"
                     cd.title = String(format: "5h重置 %@　7d重置 %@",
                                       hms(max(0, Int(g.reset5Date.timeIntervalSinceNow))),
                                       dhm(max(0, Int(g.reset7Date.timeIntervalSinceNow))))
@@ -731,14 +747,14 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - GLM fetcher
 
-    func glmAPIKey() -> String? {
-        // 1) explicit env var wins
-        if let v = ProcessInfo.processInfo.environment["GLM_API_KEY"], !v.isEmpty { return v }
-        // 2) fall back to ~/.hermes/.env (Hermes users already have the key there)
+    /// Read an env var from the process environment first, then from
+    /// ~/.hermes/.env. Returns the raw value (already trimmed).
+    func envKey(_ name: String) -> String? {
+        if let v = ProcessInfo.processInfo.environment[name], !v.isEmpty { return v }
         guard let raw = fm.contents(atPath: envPath), let s = String(data: raw, encoding: .utf8) else { return nil }
         for ln in s.split(separator: "\n") {
-            if ln.hasPrefix("CUSTOM_OPEN_BIGMODEL_CN_API_KEY=") {
-                let v = ln.dropFirst("CUSTOM_OPEN_BIGMODEL_CN_API_KEY=".count)
+            if ln.hasPrefix("\(name)=") {
+                let v = ln.dropFirst(name.count + 1)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !v.isEmpty { return v }
             }
@@ -746,9 +762,38 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return nil
     }
 
-    func fetchGlm() -> GlmData? {
-        guard let key = glmAPIKey() else {
-            errors[.glm] = "未找到 GLM key"
+    func glmAPIKey() -> String? {
+        // 1) explicit env var wins
+        // 2) fall back to ~/.hermes/.env (Hermes users already have the key there)
+        envKey("GLM_API_KEY") ?? envKey("CUSTOM_OPEN_BIGMODEL_CN_API_KEY")
+    }
+
+    func glmAltAPIKey() -> String? {
+        envKey("GLM_ALT_API_KEY") ?? envKey("CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY")
+    }
+
+    /// Both GLM accounts share one endpoint + response format; they differ only
+    /// in the key. Serial would waste a refresh cycle on two round-trips.
+    func fetchGlmPair() -> (GlmData?, GlmData?) {
+        let group = DispatchGroup()
+        let q = DispatchQueue(label: "glm-pair", attributes: .concurrent)
+        var main: GlmData?
+        var alt: GlmData?
+        if isDetected(.glm) {
+            group.enter()
+            q.async { main = self.fetchGlm(key: self.glmAPIKey(), errKey: .glm); group.leave() }
+        }
+        if isDetected(.glmAlt) {
+            group.enter()
+            q.async { alt = self.fetchGlm(key: self.glmAltAPIKey(), errKey: .glmAlt); group.leave() }
+        }
+        group.wait()
+        return (main, alt)
+    }
+
+    func fetchGlm(key: String?, errKey: Source) -> GlmData? {
+        guard let key else {
+            errors[errKey] = "未找到 GLM key"
             return nil
         }
         switch httpGetJSON(url: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
@@ -756,26 +801,44 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .success(let p):
             guard let d = p["data"] as? [String: Any],
                   let limits = d["limits"] as? [[String: Any]] else {
-                errors[.glm] = "响应格式不符"
+                errors[errKey] = "响应格式不符"
                 return nil
             }
-            // CREDIT_LIMIT entries: 5h window = unit 3 + number 5, weekly = unit 6 + number 1
+            func asInt(_ v: Any?) -> Int? {
+                if let i = v as? Int { return i }
+                if let d = v as? Double { return Int(d) }
+                return nil
+            }
+            // Preferred: CREDIT_LIMIT entries (usage/remaining point counts).
+            // 5h window = unit 3 + number 5, weekly = unit 6 + number 1.
             var w5: [String: Any]?
             var w7: [String: Any]?
             for l in limits where (l["type"] as? String) == "CREDIT_LIMIT" {
-                let n = (l["number"] as? Int) ?? Int((l["number"] as? Double) ?? -1)
-                let u = (l["unit"] as? Int) ?? Int((l["unit"] as? Double) ?? -1)
+                let n = asInt(l["number"]) ?? -1
+                let u = asInt(l["unit"]) ?? -1
                 if n == 5 || u == 3 { w5 = l }
                 if n == 1 || u == 6 { w7 = l }
             }
+            // Some plans (e.g. second account) expose no CREDIT_LIMIT at all —
+            // they report TOKENS_LIMIT windows with a bare `percentage` instead.
+            if w5 == nil || w7 == nil {
+                for l in limits where (l["type"] as? String) == "TOKENS_LIMIT" {
+                    let u = asInt(l["unit"]) ?? -1
+                    if w5 == nil && u == 3 { w5 = l }
+                    if w7 == nil && u == 6 { w7 = l }
+                }
+            }
             guard let a = w5, let b = w7 else {
-                errors[.glm] = "缺 CREDIT_LIMIT 窗口"
+                errors[errKey] = "缺 5h/7d 额度窗口"
                 return nil
             }
+            // CREDIT_LIMIT carries usage/remaining; TOKENS_LIMIT only a used-%
             func pct(_ l: [String: Any]) -> Int {
-                let cap = (l["usage"] as? Int) ?? 0
-                let rem = (l["remaining"] as? Int) ?? 0
-                return cap > 0 ? Int((Double(rem) / Double(cap) * 100).rounded()) : 0
+                if let rem = asInt(l["remaining"]), let cap = asInt(l["usage"]), cap > 0 {
+                    return Int((Double(rem) / Double(cap) * 100).rounded())
+                }
+                if let p = asInt(l["percentage"]) { return max(0, 100 - p) }
+                return 0
             }
             func resetDate(_ l: [String: Any]) -> Date {
                 let ms: Double
@@ -784,16 +847,16 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 else { ms = 0 }
                 return Date(timeIntervalSince1970: ms / 1000)
             }
-            errors[.glm] = nil
+            errors[errKey] = nil
             return GlmData(
                 level: (d["level"] as? String) ?? "?",
                 r5: pct(a), reset5Date: resetDate(a),
                 r7: pct(b), reset7Date: resetDate(b),
-                c5: (a["remaining"] as? Int) ?? 0, cap5: (a["usage"] as? Int) ?? 0,
-                c7: (b["remaining"] as? Int) ?? 0, cap7: (b["usage"] as? Int) ?? 0
+                c5: asInt(a["remaining"]) ?? 0, cap5: asInt(a["usage"]) ?? 0,
+                c7: asInt(b["remaining"]) ?? 0, cap7: asInt(b["usage"]) ?? 0
             )
         case .failure(let e):
-            errors[.glm] = e.localizedDescription
+            errors[errKey] = e.localizedDescription
             return nil
         }
     }
