@@ -14,16 +14,24 @@ import ServiceManagement
 //     A second GLM account is supported too (shown as "GLM2"): GLM_ALT_API_KEY
 //     env var, or CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY in ~/.hermes/.env
 //
+//   • OpenCode Go (opencode.ai) : GET https://opencode.ai/zen/go/v1/usage
+//     Credential: OPENCODE_GO_API_KEY, OPENCODE_XIANYU_API_KEY or
+//     OPENCODE_API_KEY env var / ~/.hermes/.env. Keys are probed in that order
+//     and the first one the API accepts is used — a subscription that lapses
+//     simply falls through to the next key instead of showing an error.
+//
 // Adding a new provider: add a case to `Source`, a branch in `detectSources()`
 // and `refresh()`/`fetch…()`. Everything else (menu, persistence, rendering)
 // is generic.
 //
 // Status item renders one line per enabled source — a colored dot (traffic
-// light) + "Label:" + aligned "5h-remain%|week-remain%" in white.
+// light) + "Label:" + aligned "5h-remain%|week-remain%" in white. With 3+
+// sources the lines split into two side-by-side columns so the type stays
+// legible instead of shrinking to fit four stacked rows.
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.5.0"
+    static let version = "1.6.0"
 
     // MARK: - Provider registry
 
@@ -146,6 +154,7 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     struct GoData {
         var r5: Int; var reset5Date: Date  // rolling window, remain %
         var r7: Int; var reset7Date: Date  // weekly window, remain %
+        var r30: Int? = nil; var reset30Date: Date? = nil  // monthly (menu only)
     }
 
     var codex: CodexData?
@@ -153,6 +162,9 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var glmAlt: GlmData?
     var opencode: GoData?
     var errors: [Source: String] = [:]
+    /// which of the several OpenCode keys answered last — kept so the menu can
+    /// name it and so the next refresh probes that one first
+    var openCodeKeyCache: (name: String, key: String)?
 
     // MARK: - Lifecycle
 
@@ -561,13 +573,18 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func titleImage(lines: [(label: String, value: String, color: NSColor)]) -> NSImage {
+        // Up to 2 sources stack in one column. 3+ split into two side-by-side
+        // columns (2 rows each) instead of squeezing 3–4 rows into the ~30pt
+        // menu bar, which used to force 7pt type.
+        let n = lines.count
+        let colCount = n >= 3 ? 2 : 1
+        let rows = max(1, Int(ceil(Double(n) / Double(colCount))))
         // the menu bar is ~30pt tall: 2 lines fit comfortably at 11pt leading,
         // 3 lines need compact metrics (8pt leading / ~7.8pt font); 4 lines only
         // fit with tighter leading (7.3pt / ~7.1pt font) or they get clipped
-        let n = lines.count
-        let lineH: CGFloat = n <= 2 ? 11 : (n == 3 ? 8 : 7.3)
-        let dotD: CGFloat = n <= 2 ? 4.5 : (n == 3 ? 3.4 : 3.0)
-        let fontSize: CGFloat = n <= 2 ? 9.5 : (n == 3 ? 7.8 : 7.1)
+        let lineH: CGFloat = rows <= 2 ? 11 : (rows == 3 ? 8 : 7.3)
+        let dotD: CGFloat = rows <= 2 ? 4.5 : (rows == 3 ? 3.4 : 3.0)
+        let fontSize: CGFloat = rows <= 2 ? 9.5 : (rows == 3 ? 7.8 : 7.1)
         let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .regular)
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 0
@@ -575,36 +592,79 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: para, .foregroundColor: NSColor.white]
 
         let labelX: CGFloat = dotD + 6.5
-        // label column width = widest label → values align across lines
-        let labelW = lines.map { ceil(($0.label as NSString).size(withAttributes: attrs).width) }.max() ?? 0
-        let valueX = labelX + labelW + 3
-        let valueW = lines.map { ceil(($0.value as NSString).size(withAttributes: attrs).width) }.max() ?? 0
-
-        let img = NSImage(size: NSSize(width: valueX + valueW + 2, height: CGFloat(lines.count) * lineH))
-        img.lockFocusFlipped(true)
-        // split "98%|100%" → right-align the part before the pipe into its own
-        // sub-column so the pipe lands on the same x on every line, whatever
-        // the digit counts
-        let split = lines.map { ($0.value as NSString).components(separatedBy: "|") }
-        let p1W = split.map { ceil(((($0.first ?? "") as NSString).size(withAttributes: attrs)).width) }.max() ?? 0
+        let colGap: CGFloat = 10      // room for the divider between columns
         let pipeW = ceil(("|" as NSString).size(withAttributes: attrs).width)
-        let pipeX = valueX + p1W + 1
-        for (i, l) in lines.enumerated() {
-            let cy = CGFloat(i) * lineH + lineH * 0.52  // dot centered on glyph ink
-            l.color.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 0, y: cy - dotD / 2, width: dotD, height: dotD)).fill()
-            let y = CGFloat(i) * lineH - 0.5
-            (l.label as NSString).draw(in: NSRect(x: labelX, y: y, width: labelW + 4, height: lineH),
-                                       withAttributes: attrs)
-            let parts = split[i]
-            let p1 = (parts.first ?? "") as NSString
-            p1.draw(in: NSRect(x: pipeX - ceil(p1.size(withAttributes: attrs).width) - 1, y: y, width: p1W + 2, height: lineH),
-                    withAttributes: attrs)
-            if parts.count > 1 {
-                ("|" as NSString).draw(in: NSRect(x: pipeX, y: y, width: pipeW + 1, height: lineH),
-                                       withAttributes: attrs)
-                ((parts[1]) as NSString).draw(in: NSRect(x: pipeX + pipeW + 1, y: y, width: valueW + 2, height: lineH),
-                                              withAttributes: attrs)
+
+        // first column takes `rows` lines, whatever is left overflows right
+        var columns: [[(label: String, value: String, color: NSColor)]] = []
+        var cursor = 0
+        for _ in 0..<colCount {
+            let take = min(rows, n - cursor)
+            if take <= 0 { break }
+            columns.append(Array(lines[cursor..<(cursor + take)]))
+            cursor += take
+        }
+
+        // per column: labels share one x, and the part before the pipe is
+        // right-aligned into its own sub-column so pipes and percentages line
+        // up across rows whatever the digit counts
+        struct Col {
+            var labelW: CGFloat = 0
+            var p1W: CGFloat = 0
+            var p2W: CGFloat = 0
+            var hasPipe = false
+            var pipeX: CGFloat = 0
+            var width: CGFloat = 0
+        }
+        var metrics: [Col] = []
+        for col in columns {
+            var m = Col()
+            m.labelW = col.map { ceil(($0.label as NSString).size(withAttributes: attrs).width) }.max() ?? 0
+            m.p1W = col.map { ceil(((($0.value.components(separatedBy: "|").first ?? "") as NSString)).size(withAttributes: attrs).width) }.max() ?? 0
+            m.p2W = col.map { c -> CGFloat in
+                let parts = c.value.components(separatedBy: "|")
+                return parts.count > 1 ? ceil((parts[1] as NSString).size(withAttributes: attrs).width) : 0
+            }.max() ?? 0
+            m.hasPipe = col.contains { $0.value.contains("|") }
+            let valueX = labelX + m.labelW + 3
+            m.pipeX = valueX + m.p1W + 1
+            m.width = m.hasPipe ? m.pipeX + pipeW + 1 + m.p2W : valueX + m.p1W
+            metrics.append(m)
+        }
+
+        let totalW = metrics.reduce(0) { $0 + $1.width }
+                   + colGap * CGFloat(max(0, columns.count - 1)) + 2
+        let img = NSImage(size: NSSize(width: totalW, height: CGFloat(rows) * lineH))
+        img.lockFocusFlipped(true)
+        var x0: CGFloat = 0
+        for (ci, col) in columns.enumerated() {
+            let m = metrics[ci]
+            for (i, l) in col.enumerated() {
+                let cy = CGFloat(i) * lineH + lineH * 0.52  // dot centered on glyph ink
+                l.color.setFill()
+                NSBezierPath(ovalIn: NSRect(x: x0, y: cy - dotD / 2, width: dotD, height: dotD)).fill()
+                let y = CGFloat(i) * lineH - 0.5
+                (l.label as NSString).draw(in: NSRect(x: x0 + labelX, y: y, width: m.labelW + 4, height: lineH),
+                                           withAttributes: attrs)
+                let parts = l.value.components(separatedBy: "|")
+                let p1 = (parts.first ?? "") as NSString
+                p1.draw(in: NSRect(x: x0 + m.pipeX - ceil(p1.size(withAttributes: attrs).width) - 1, y: y,
+                                   width: m.p1W + 2, height: lineH),
+                        withAttributes: attrs)
+                if parts.count > 1 {
+                    ("|" as NSString).draw(in: NSRect(x: x0 + m.pipeX, y: y, width: pipeW + 1, height: lineH),
+                                           withAttributes: attrs)
+                    (parts[1] as NSString).draw(in: NSRect(x: x0 + m.pipeX + pipeW + 1, y: y,
+                                                           width: m.p2W + 2, height: lineH),
+                                                withAttributes: attrs)
+                }
+            }
+            x0 += m.width
+            if ci < columns.count - 1 {
+                // hairline divider so the two column groups read as separate
+                NSColor(white: 1.0, alpha: 0.22).setFill()
+                NSRect(x: x0 + colGap / 2, y: lineH * 0.2, width: 1, height: CGFloat(rows) * lineH - lineH * 0.4).fill()
+                x0 += colGap
             }
         }
         img.unlockFocus()
@@ -676,10 +736,18 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             case .opencode:
                 if let o = opencode {
+                    // name the key that answered: several subscriptions can sit
+                    // in ~/.hermes/.env and only one of them is live
+                    let which = openCodeKeyCache.map { "　(\($0.name))" } ?? ""
                     info.title = "5h余 \(o.r5)%　7d余 \(o.r7)%"
-                    cd.title = String(format: "5h重置 %@　7d重置 %@",
-                                      hms(max(0, Int(o.reset5Date.timeIntervalSinceNow))),
-                                      dhm(max(0, Int(o.reset7Date.timeIntervalSinceNow))))
+                               + (o.r30.map { "　30d余 \($0)%" } ?? "") + which
+                    var t = String(format: "5h重置 %@　7d重置 %@",
+                                   hms(max(0, Int(o.reset5Date.timeIntervalSinceNow))),
+                                   dhm(max(0, Int(o.reset7Date.timeIntervalSinceNow))))
+                    if let d30 = o.reset30Date {
+                        t += "　30d重置 " + dhm(max(0, Int(d30.timeIntervalSinceNow)))
+                    }
+                    cd.title = t
                 } else {
                     info.title = errors[s] ?? "加载中…"; cd.title = ""
                 }
@@ -862,27 +930,51 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - OpenCode Go (opencode.ai) fetcher
+    // One subscription = one key, and keys stop working the moment the plan
+    // lapses. Several can coexist in ~/.hermes/.env, so probe them in a fixed
+    // order and use the first one the API accepts. The winning key is cached
+    // and tried first next time, so a stale key costs one request per refresh
+    // at most.
 
-    func openCodeKey() -> String? {
-        // 1) standard env var used by OpenCode tooling
-        if let v = ProcessInfo.processInfo.environment["OPENCODE_API_KEY"], !v.isEmpty { return v }
-        // 2) Hermes-style env files (~/.hermes/.env)
-        if let raw = fm.contents(atPath: envPath), let s = String(data: raw, encoding: .utf8) {
-            for ln in s.split(separator: "\n") {
-                for name in ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"] where ln.hasPrefix("\(name)=") {
-                    let v = ln.dropFirst(name.count + 1).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !v.isEmpty { return v }
-                }
-            }
+    static let openCodeKeyNames = ["OPENCODE_GO_API_KEY", "OPENCODE_XIANYU_API_KEY", "OPENCODE_API_KEY"]
+
+    /// candidate keys in probe order (name kept for the menu)
+    func openCodeKeys() -> [(name: String, key: String)] {
+        AppState.openCodeKeyNames.compactMap { name in
+            envKey(name).map { (name, $0) }
         }
-        return nil
     }
 
+    func openCodeKey() -> String? { openCodeKeys().first?.key }
+
     func fetchOpenCode() -> GoData? {
-        guard let key = openCodeKey() else {
+        let candidates = openCodeKeys()
+        guard !candidates.isEmpty else {
             errors[.opencode] = "未找到 OpenCode key"
             return nil
         }
+        // last known-good key first
+        var ordered = candidates
+        if let good = openCodeKeyCache, let i = ordered.firstIndex(where: { $0.name == good.name }) {
+            ordered.remove(at: i)
+            ordered.insert(good, at: 0)
+        }
+        var lastError = "未知错误"
+        for cand in ordered {
+            switch fetchOpenCodeOnce(key: cand.key) {
+            case .success(let d):
+                openCodeKeyCache = cand
+                errors[.opencode] = nil
+                return d
+            case .failure(let e):
+                lastError = "\(cand.name): \(e.localizedDescription)"
+            }
+        }
+        errors[.opencode] = lastError
+        return nil
+    }
+
+    func fetchOpenCodeOnce(key: String) -> Result<GoData, Error> {
         // opencode.ai sits behind Cloudflare — a browser UA is required
         // (plain URL clients get 403 error 1010).
         let headers: [String: String] = [
@@ -894,8 +986,8 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let u = p["usage"] as? [String: Any],
                   let rolling = u["rolling"] as? [String: Any],
                   let weekly = u["weekly"] as? [String: Any] else {
-                errors[.opencode] = "响应格式不符"
-                return nil
+                return .failure(NSError(domain: "cq", code: 4,
+                                        userInfo: [NSLocalizedDescriptionKey: "响应格式不符"]))
             }
             func window(_ w: [String: Any]) -> (Int, Date) {
                 let used = (w["percent"] as? Int) ?? Int((w["percent"] as? Double) ?? 0)
@@ -907,11 +999,17 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let (r5, d5) = window(rolling)
             let (r7, d7) = window(weekly)
-            errors[.opencode] = nil
-            return GoData(r5: r5, reset5Date: d5, r7: r7, reset7Date: d7)
+            var data = GoData(r5: r5, reset5Date: d5, r7: r7, reset7Date: d7)
+            // monthly is not a plan limit on every tier, but when it is present
+            // the menu shows it
+            if let monthly = u["monthly"] as? [String: Any] {
+                let (r30, d30) = window(monthly)
+                data.r30 = r30
+                data.reset30Date = d30
+            }
+            return .success(data)
         case .failure(let e):
-            errors[.opencode] = e.localizedDescription
-            return nil
+            return .failure(e)
         }
     }
 }

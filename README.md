@@ -1,15 +1,14 @@
 # CodexQuota
 
-<p align="center"><b>macOS 菜单栏 AI 编程订阅额度监控</b><br>一个状态栏图标，同时盯住 Codex 与 GLM Coding Plan 的 5 小时 / 每周剩余额度</p>
+<p align="center"><b>macOS 菜单栏 AI 编程订阅额度监控</b><br>一个状态栏图标，同时盯住 Codex / GLM / OpenCode 的 5 小时 / 每周剩余额度</p>
 
 ```
- 🔴 Codex:0%|84%      ← 红点 = 5小时窗口已用满
- 🟢 GLM:98%|96%
- 🟢 GLM2:93%|90%      ← 第二个 GLM 账号（检测到才显示）
- 🟢 OpenCode:100%|42%
+ 单列（1–2 项）            两列（3 项以上自动分栏）
+ 🔴 Codex:0%|84%     ←     🟢 Codex:98%|100%  │ 🟢 GLM2:93%|90%
+ 🟢 GLM:98%|96%            🟡 GLM:100%|62%    │ 🟢 OpenCode:100%|42%
 ```
 
-白色等宽文字 + 彩色状态点，与 macOS 菜单栏原生风格一致。同一状态项内多行叠显，每个被监控的服务占一行，点击菜单即可勾选显示哪些。
+白色等宽文字 + 彩色状态点，与 macOS 菜单栏原生风格一致。勾选 1–2 项时纵向叠显；勾选 3 项及以上自动分成左右两列（每列最多两行），字号不再被迫压到 7pt。点击菜单即可勾选显示哪些服务。
 
 <p align="center"><img src="docs/screenshot-menu.png" alt="CodexQuota 菜单截图" width="420"></p>
 
@@ -22,8 +21,9 @@
 - **应用自更新**：点「立即更新」自动检查 GitHub 最新 release，有新版则下载源码、本机重编译、原地替换并重启，全程无需重装
 - **Codex（ChatGPT 订阅）**：5 小时窗口 + 每周窗口剩余百分比、重置倒计时、限流状态、套餐类型
 - **GLM Coding Plan（智谱）**：5 小时 + 每周积分余额（精确到点数）、套餐档位（lite/pro/max）、重置时间；支持第二个账号（GLM2），点数制 / 百分比制两种套餐结构自动适配
-- **OpenCode Go（opencode.ai）**：滚动窗口 + 每周窗口剩余百分比与重置倒计时
-- **状态栏两列对齐**：标签列宽度取各行最宽值，无论数值多少，各行的百分比始终垂直对齐
+- **OpenCode Go（opencode.ai）**：滚动窗口 + 每周窗口剩余百分比与重置倒计时，接口若返回月度窗口则一并显示；同时存在多个 key（如换订阅后旧 key 未删）时按顺序探测，自动使用仍然有效的那一个
+- **状态栏自动分栏**：勾选 3 项及以上时自动排成左右两列（竖线分隔），字号保持 9.5pt，不再为了塞下四行而缩小到 7pt
+- **状态栏对齐**：同一列内标签宽度取最宽值，无论数值多少，各行的百分比始终垂直对齐
 - **状态点三色**：🟢 余量 > 40%　🟡 11–40%　🔴 ≤ 10% 或已限流
 - 5 分钟自动刷新（可 ⌘R 手动），重置倒计时本地每 30 秒刷新
 - 零配置后台运行：无 Dock 图标、CPU 占用 ~0%、内存 ~50MB
@@ -96,7 +96,13 @@ launchctl setenv GLM_ALT_API_KEY "第二个账号的key"
 
 ### OpenCode Go
 
-app 默认按顺序读取 `OPENCODE_API_KEY` 环境变量和 `~/.hermes/.env` 中的 `OPENCODE_GO_API_KEY`。也可以显式设置：
+一个订阅对应一个 key。换订阅后旧 key 会立刻失效，所以 app 按固定顺序探测，用第一个接口仍然接受的那个：
+
+1. `OPENCODE_GO_API_KEY`（环境变量或 `~/.hermes/.env`）
+2. `OPENCODE_XIANYU_API_KEY`
+3. `OPENCODE_API_KEY`
+
+探测成功的 key 会被记住并在下次刷新时优先尝试，失效的 key 因此最多每次刷新多花一个请求。菜单里 OpenCode 那一行会注明当前用的是哪个 key（例如 `(OPENCODE_XIANYU_API_KEY)`），方便确认订阅是否接对。也可以显式指定：
 
 ```bash
 launchctl setenv OPENCODE_API_KEY "你的key"
@@ -143,7 +149,7 @@ OpenCode Go (opencode.ai)
   重新检测可用服务
 更新于 下午4:41
 ────────────────
-CodexQuota v1.4.0
+CodexQuota v1.6.0
 退出          ⌘Q
 ```
 
@@ -157,14 +163,27 @@ CodexQuota v1.4.0
 | Codex | `GET chatgpt.com/backend-api/wham/usage` | `~/.codex/auth.json` 的 OAuth access_token |
 | GLM | `GET open.bigmodel.cn/api/monitor/usage/quota/limit` | GLM Coding Plan API Key |
 | GLM2（第二账号） | 同上 | `GLM_ALT_API_KEY` / `CUSTOM_OPEN_BIGMODEL_CN_ALT_API_KEY` |
+| OpenCode | `GET opencode.ai/zen/go/v1/usage` | `OPENCODE_GO_API_KEY` / `OPENCODE_XIANYU_API_KEY` / `OPENCODE_API_KEY`（按序取第一个有效的） |
 
-两个都是官方接口、纯 GET、只读。app 不收集、不上传任何数据；所有请求直接从你的机器发往对应服务。
+全部都是官方接口、纯 GET、只读。app 不收集、不上传任何数据；所有请求直接从你的机器发往对应服务。
+
+## 更新日志
+
+**v1.6.0**
+
+- 状态栏自动分栏：勾选 3 项及以上时排成左右两列（细竖线分隔），每列最多两行，字号保持 9.5pt
+- OpenCode 支持多个 key 并存：按 `OPENCODE_GO_API_KEY` → `OPENCODE_XIANYU_API_KEY` → `OPENCODE_API_KEY` 顺序探测，自动使用仍然有效的订阅，并在菜单里注明用的是哪个
+- OpenCode 接口若返回月度窗口，菜单中一并显示剩余百分比与重置时间
+
+**v1.5.0**
+
+- 支持第二个 GLM 账号（GLM2），点数制 / 百分比制套餐自动适配
 
 ## 目录结构
 
 ```
 CodexQuota/
-├── Sources/codex_quota.swift   # 全部源码（单文件，~450 行）
+├── Sources/codex_quota.swift   # 全部源码（单文件，~1000 行）
 ├── Info.plist                  # bundle 配置
 ├── scripts/install.sh          # 一键安装脚本
 └── README.md
