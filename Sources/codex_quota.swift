@@ -31,7 +31,7 @@ import ServiceManagement
 
 final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared = AppState()
-    static let version = "1.6.0"
+    static let version = "1.6.1"
 
     // MARK: - Provider registry
 
@@ -60,6 +60,15 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .glm:      return "未配置 — 设置 GLM_API_KEY 后点「重新扫描」"
             case .glmAlt:   return "未配置 — 设置 GLM_ALT_API_KEY 后点「重新扫描」"
             case .opencode: return "未配置 — 设置 OPENCODE_API_KEY 后点「重新扫描」"
+            }
+        }
+        /// Provider family. Accounts of one provider (GLM + GLM2) belong in the
+        /// same bar column; singleton families share the other column.
+        var family: String {
+            switch self {
+            case .codex:    return "codex"
+            case .glm, .glmAlt: return "glm"
+            case .opencode: return "opencode"
             }
         }
     }
@@ -540,45 +549,89 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func updateTitle() {
-        var lines: [(label: String, value: String, color: NSColor)] = []
+        var cells: [(source: Source, label: String, value: String, color: NSColor)] = []
         for s in Source.allCases where visible.contains(s) {
             switch s {
             case .codex:
                 if let q = codex {
-                    lines.append((s.label + ":", String(format: "%d%%|%d%%", q.r5, q.r7),
+                    cells.append((s, s.label + ":", String(format: "%d%%|%d%%", q.r5, q.r7),
                                   color(for: min(q.r5, q.r7), limitReached: q.limitReached)))
                 } else {
-                    lines.append((s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
+                    cells.append((s, s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
                 }
             case .glm, .glmAlt:
                 let g = s == .glm ? glm : glmAlt
                 if let g {
-                    lines.append((s.label + ":", String(format: "%d%%|%d%%", g.r5, g.r7),
+                    cells.append((s, s.label + ":", String(format: "%d%%|%d%%", g.r5, g.r7),
                                   color(for: min(g.r5, g.r7), limitReached: false)))
                 } else {
-                    lines.append((s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
+                    cells.append((s, s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
                 }
             case .opencode:
                 if let o = opencode {
-                    lines.append((s.label + ":", String(format: "%d%%|%d%%", o.r5, o.r7),
+                    cells.append((s, s.label + ":", String(format: "%d%%|%d%%", o.r5, o.r7),
                                   color(for: min(o.r5, o.r7), limitReached: false)))
                 } else {
-                    lines.append((s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
+                    cells.append((s, s.label + ":", "--", errors[s] == nil ? .systemGray : .systemRed))
                 }
             }
         }
-        statusItem.button?.image = titleImage(lines: lines)
+        let columns = columnLayout(cells.map(\.source)).map { group in
+            group.compactMap { src in
+                cells.first { $0.source == src }.map { ($0.label, $0.value, $0.color) }
+            }
+        }
+        statusItem.button?.image = titleImage(columns: columns)
         statusItem.button?.title = ""
         statusItem.button?.attributedTitle = NSAttributedString()
     }
 
-    func titleImage(lines: [(label: String, value: String, color: NSColor)]) -> NSImage {
+    /// Which sources share a column once the bar splits in two.
+    ///
+    /// Two accounts of one provider (GLM + GLM2) have to sit in the same column —
+    /// putting them on opposite sides of the divider is what made the pair read
+    /// as unrelated. So families are packed whole, biggest first, into two bins
+    /// of `rows` slots each, then the bins are ordered by where their first
+    /// member sits in Source.allCases so the primary service keeps top-left.
+    func columnLayout(_ sources: [Source]) -> [[Source]] {
+        guard sources.count >= 3 else { return [sources] }   // 1–2 rows: single column
+        let rows = Int(ceil(Double(sources.count) / 2))
+        var families: [[Source]] = []
+        for s in sources {
+            if let i = families.firstIndex(where: { $0[0].family == s.family }) {
+                families[i].append(s)
+            } else {
+                families.append([s])
+            }
+        }
+        // a family too big for one column cannot stay whole — fall back to plain order
+        if families.contains(where: { $0.count > rows }) { return [sources] }
+        let bySize = families.enumerated()
+            .sorted { a, b in
+                a.element.count == b.element.count ? a.offset < b.offset : a.element.count > b.element.count
+            }
+            .map(\.element)
+        var bins: [[Source]] = []
+        for f in bySize {
+            if let i = bins.firstIndex(where: { $0.count + f.count <= rows }) {
+                bins[i].append(contentsOf: f)
+            } else {
+                bins.append(f)
+            }
+        }
+        guard bins.count == 2 else { return [sources] }
+        return bins.sorted { a, b in
+            (sources.firstIndex(of: a[0]) ?? Int.max) < (sources.firstIndex(of: b[0]) ?? Int.max)
+        }
+    }
+
+    func titleImage(columns inputColumns: [[(label: String, value: String, color: NSColor)]]) -> NSImage {
         // Up to 2 sources stack in one column. 3+ split into two side-by-side
         // columns (2 rows each) instead of squeezing 3–4 rows into the ~30pt
-        // menu bar, which used to force 7pt type.
-        let n = lines.count
-        let colCount = n >= 3 ? 2 : 1
-        let rows = max(1, Int(ceil(Double(n) / Double(colCount))))
+        // menu bar, which used to force 7pt type. Which source lands in which
+        // column is decided by columnLayout(), not by order alone.
+        let columns = inputColumns.filter { !$0.isEmpty }
+        let rows = max(1, columns.map(\.count).max() ?? 1)
         // the menu bar is ~30pt tall: 2 lines fit comfortably at 11pt leading,
         // 3 lines need compact metrics (8pt leading / ~7.8pt font); 4 lines only
         // fit with tighter leading (7.3pt / ~7.1pt font) or they get clipped
@@ -594,16 +647,6 @@ final class AppState: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let labelX: CGFloat = dotD + 6.5
         let colGap: CGFloat = 10      // room for the divider between columns
         let pipeW = ceil(("|" as NSString).size(withAttributes: attrs).width)
-
-        // first column takes `rows` lines, whatever is left overflows right
-        var columns: [[(label: String, value: String, color: NSColor)]] = []
-        var cursor = 0
-        for _ in 0..<colCount {
-            let take = min(rows, n - cursor)
-            if take <= 0 { break }
-            columns.append(Array(lines[cursor..<(cursor + take)]))
-            cursor += take
-        }
 
         // per column: labels share one x, and the part before the pipe is
         // right-aligned into its own sub-column so pipes and percentages line
